@@ -1,0 +1,161 @@
+using UnityEngine;
+using Unity.Robotics.ROSTCPConnector;
+using RosMessageTypes.Geometry;
+using RosMessageTypes.Sensor;
+using Unity.Robotics.UrdfImporter.Control;
+
+namespace RosSharp.Control
+{
+    public enum ControlMode { Keyboard, ROS }
+
+    public class AGVController : MonoBehaviour
+    {
+        public string laserTopic = "/scan";
+        public string cmdVelTopic = "/cmd_vel";
+        public float minSafeDistance = 0.1f;
+
+        public GameObject wheel1;
+        public GameObject wheel2;
+        public ControlMode mode = ControlMode.ROS;
+
+        private ArticulationBody wA1;
+        private ArticulationBody wA2;
+
+        public float maxLinearSpeed = 2f;
+        public float maxRotationalSpeed = 1f;
+        public float wheelRadius = 0.033f;
+        public float trackWidth = 0.288f;
+        public float forceLimit = 10f;
+        public float damping = 10f;
+
+        private ROSConnection ros;
+        private float rosLinear = 0f;
+        private float rosAngular = 0f;
+
+        private bool objectDetected = false;
+        private bool turning = false;
+        private float turnStartTime = 0f;
+        private float turnDuration = 1.5f; // Adjust to match 90-degree turn for your bot
+
+        void Start()
+        {
+            wA1 = wheel1.GetComponent<ArticulationBody>();
+            wA2 = wheel2.GetComponent<ArticulationBody>();
+            SetParameters(wA1);
+            SetParameters(wA2);
+
+            ros = ROSConnection.GetOrCreateInstance();
+            ros.Subscribe<LaserScanMsg>(laserTopic, LaserCallback);
+            ros.RegisterPublisher<TwistMsg>(cmdVelTopic);
+        }
+
+        void LaserCallback(LaserScanMsg msg)
+        {
+            int frontIndex = msg.ranges.Length / 2;
+            float frontRange = msg.ranges[0];
+
+            Debug.Log("Front range: " + frontRange);
+            Debug.Log("Range array length:" + msg.ranges.Length);
+
+            if (!float.IsInfinity(frontRange) && !float.IsNaN(frontRange) && frontRange < minSafeDistance)
+            {
+                objectDetected = true;
+
+                if (!turning)
+                {
+                    turning = true;
+                    turnStartTime = Time.time;
+                    Debug.Log("Obstacle ahead! Starting 90-degree turn.");
+                }
+            }
+            else
+            {
+                objectDetected = false;
+            }
+        }
+
+        void Update()
+        {
+            Debug.DrawRay(transform.position, transform.forward * 1.0f, objectDetected ? Color.red : Color.green);
+        }
+
+        void FixedUpdate()
+        {
+            if (turning)
+            {
+                float elapsed = Time.time - turnStartTime;
+
+                if (elapsed < turnDuration)
+                {
+                    // Rotate in place
+                    RobotInput(0f, 0.8f); // Adjust rotation speed if needed
+                }
+                else
+                {
+                    turning = false;
+                    objectDetected = false;
+                    RobotInput(0f, 0f);
+                    Debug.Log("Turn complete. Resuming forward motion.");
+                }
+                return;
+            }
+
+            if (!objectDetected)
+            {
+                // Move forward by default if no object detected
+                rosLinear = 0.2f;
+                rosAngular = 0f;
+                RobotInput(rosLinear, rosAngular);
+            }
+        }
+
+        private void SetParameters(ArticulationBody joint)
+        {
+            ArticulationDrive drive = joint.xDrive;
+            drive.forceLimit = forceLimit;
+            drive.damping = damping;
+            joint.xDrive = drive;
+        }
+
+        private void SetSpeed(ArticulationBody joint, float wheelSpeed = float.NaN)
+        {
+            ArticulationDrive drive = joint.xDrive;
+            if (float.IsNaN(wheelSpeed))
+            {
+                drive.targetVelocity = ((2 * maxLinearSpeed) / wheelRadius) * Mathf.Rad2Deg;
+            }
+            else
+            {
+                drive.targetVelocity = wheelSpeed;
+            }
+            joint.xDrive = drive;
+        }
+
+        private void RobotInput(float speed, float rotSpeed)
+        {
+            if (speed > maxLinearSpeed)
+                speed = maxLinearSpeed;
+
+            if (rotSpeed > maxRotationalSpeed)
+                rotSpeed = maxRotationalSpeed;
+
+            float wheel1Rotation = (speed / wheelRadius);
+            float wheel2Rotation = wheel1Rotation;
+            float wheelSpeedDiff = ((rotSpeed * trackWidth) / wheelRadius);
+
+            if (rotSpeed != 0)
+            {
+                wheel1Rotation = (wheel1Rotation + (wheelSpeedDiff / 1)) * Mathf.Rad2Deg;
+                wheel2Rotation = (wheel2Rotation - (wheelSpeedDiff / 1)) * Mathf.Rad2Deg;
+            }
+            else
+            {
+                wheel1Rotation *= Mathf.Rad2Deg;
+                wheel2Rotation *= Mathf.Rad2Deg;
+            }
+
+            SetSpeed(wA1, wheel1Rotation);
+            SetSpeed(wA2, wheel2Rotation);
+        }
+    }
+}
