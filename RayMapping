@@ -1,0 +1,144 @@
+using UnityEngine;
+using Unity.Robotics.ROSTCPConnector;
+using RosMessageTypes.Sensor;
+
+public class LidarVisualizer : MonoBehaviour
+{
+    public string laserTopic = "/scan";
+    private ROSConnection ros;
+
+    public float maxRange = 10f;
+    public Color lineColor = Color.green;
+    public float dotSize = 0.05f;
+
+    // Store the latest lidar ranges — always updated on new messages
+    private float[] latestRanges = new float[0];
+    private int lidarCount = 0;
+
+    private LineRenderer[] lineRenderers;
+    private GameObject[] dots;
+	
+	public GameObject changer;
+	private Vector3 lastPosition;
+
+    void Start()
+    {
+        ros = ROSConnection.GetOrCreateInstance();
+        ros.Subscribe<LaserScanMsg>(laserTopic, LaserScanReceived);
+
+        // Initialize with expected lidar count
+        lidarCount = 180;  // default for TurtleBot3
+	lastPosition = changer.transform.position;
+
+        latestRanges = new float[lidarCount];
+        SetupVisualizers(lidarCount);
+    }
+
+    void SetupVisualizers(int count)
+    {
+        // Destroy old visuals if any
+        if (lineRenderers != null)
+        {
+            foreach (var lr in lineRenderers)
+                if (lr != null) Destroy(lr.gameObject);
+        }
+        if (dots != null)
+        {
+            foreach (var dot in dots)
+                if (dot != null) Destroy(dot);
+        }
+
+        lineRenderers = new LineRenderer[count];
+        dots = new GameObject[count];
+
+        for (int i = 0; i < count; i++)
+        {
+            GameObject lineObj = new GameObject("LidarLine_" + i);
+            lineObj.transform.parent = this.transform;
+            lineObj.transform.localPosition = Vector3.zero;
+            lineObj.transform.localRotation = Quaternion.identity;
+
+            var lr = lineObj.AddComponent<LineRenderer>();
+            lr.positionCount = 2;
+            lr.startWidth = 0.01f;
+            lr.endWidth = 0.01f;
+            lr.material = new Material(Shader.Find("Sprites/Default"));
+            lr.startColor = lineColor;
+            lr.endColor = lineColor;
+
+            lineRenderers[i] = lr;
+
+            var dot = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+            dot.name = "LidarDot_" + i;
+            dot.transform.parent = this.transform;
+            dot.transform.localScale = Vector3.one * dotSize;
+            dot.GetComponent<Renderer>().material.color = Color.red;
+            Destroy(dot.GetComponent<Collider>());
+
+            dots[i] = dot;
+        }
+    }
+
+    void LaserScanReceived(LaserScanMsg msg)
+    {
+        // Check if lidar count changed (e.g., dynamic reconfigure)
+        if (msg.ranges.Length != lidarCount)
+        {
+            lidarCount = msg.ranges.Length;
+            latestRanges = new float[lidarCount];
+            SetupVisualizers(lidarCount);
+        }
+
+        for (int i = 0; i < lidarCount; i++)
+        {
+            float val = (float)msg.ranges[i];
+            latestRanges[i] = (float.IsInfinity(val) || float.IsNaN(val)) ? maxRange : val;
+        }
+    }
+
+    void Update()
+{
+    if (latestRanges == null || latestRanges.Length == 0)
+        return;
+
+    Vector3 currentPosition = changer.transform.position;
+
+    // Only update if position (not rotation) changed
+    if (Vector3.Distance(currentPosition, lastPosition) < 0.001f)
+        return;
+
+    // Save current position
+    lastPosition = currentPosition;
+
+    Vector3 origin = changer.transform.position;
+    Quaternion rotation = changer.transform.rotation; // capture rotation only ONCE
+
+    for (int i = 0; i < lidarCount; i++)
+    {
+        // Reverse angle to match robot front
+        float angle = (i * 2f + 180f - 90f) % 360f;
+        float rad = Mathf.Deg2Rad * angle;
+
+        // Direction in local space
+        Vector3 localDirection = new Vector3(Mathf.Cos(rad), 0, Mathf.Sin(rad));
+
+        // Convert to world space using robot rotation
+        Vector3 worldDirection = rotation * localDirection;
+
+        float length = Mathf.Min(latestRanges[i], maxRange);
+        Vector3 endPoint = origin + worldDirection * length;
+
+        if (lineRenderers[i] != null)
+        {
+            lineRenderers[i].SetPosition(0, origin);
+            lineRenderers[i].SetPosition(1, endPoint);
+        }
+
+        if (dots[i] != null)
+        {
+            dots[i].transform.position = endPoint;
+        }
+    }
+}
+
+}
