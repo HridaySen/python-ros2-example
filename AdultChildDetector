@@ -1,0 +1,88 @@
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import LaserScan
+import math
+
+class ObjectDetector(Node):
+    def __init__(self):
+        super().__init__('object_detector')
+        self.subscriber = self.create_subscription(
+            LaserScan,
+            '/scan',
+            self.scan_callback,
+            10
+        )
+        self.width_threshold_cm = 35.0
+        self.detection_radius = 1.0  # meters
+        self.detected_centers = []
+        self.detections = []
+
+    def scan_callback(self, msg):
+        self.detected_centers.clear()
+        self.detections.clear()
+
+        ranges = list(msg.ranges)
+        angle_min = msg.angle_min
+        angle_increment = msg.angle_increment
+        lidar_count = len(ranges)
+
+        for i in range(lidar_count - 1):
+            r1 = ranges[i]
+            r2 = ranges[i + 1]
+
+            if math.isinf(r1) or math.isinf(r2) or math.isnan(r1) or math.isnan(r2):
+                continue
+
+            angle_between = angle_increment
+            width = math.sqrt(r1**2 + r2**2 - 2 * r1 * r2 * math.cos(angle_between))
+            width_cm = width * 100.0
+
+            if width_cm < 5.0 or width_cm > 100.0:
+                continue
+
+            avg_distance = (r1 + r2) / 2.0
+            avg_angle = angle_min + i * angle_increment + angle_increment / 2.0
+
+            x = avg_distance * math.cos(avg_angle)
+            y = avg_distance * math.sin(avg_angle)
+            center = (x, y)
+
+            if self.is_duplicate(center):
+                continue
+
+            type_ = 'child' if width_cm <= self.width_threshold_cm else 'adult'
+            detection = {
+                'type': type_,
+                'angle_deg': math.degrees(avg_angle) % 360,
+                'distance': avg_distance,
+                'center': center
+            }
+
+            self.detections.append(detection)
+            self.detected_centers.append(center)
+
+        self.print_detections()
+
+    def is_duplicate(self, new_point):
+        for existing in self.detected_centers:
+            dx = existing[0] - new_point[0]
+            dy = existing[1] - new_point[1]
+            if math.sqrt(dx**2 + dy**2) < self.detection_radius:
+                return True
+        return False
+
+    def print_detections(self):
+        for d in self.detections:
+            self.get_logger().info(
+                f"Detected {d['type']} at {d['angle_deg']:.1f}° - {d['distance']:.2f}m | XY: {d['center']}"
+            )
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = ObjectDetector()
+    rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()
