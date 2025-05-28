@@ -1,0 +1,292 @@
+using UnityEngine;
+using Unity.Robotics.ROSTCPConnector;
+using RosMessageTypes.Geometry;
+using Unity.Robotics.UrdfImporter.Control;
+using Codice.Client.BaseCommands.WkStatus.Printers;
+using Unity.Robotics.ROSTCPConnector;
+using Unity.Robotics.ROSTCPConnector.ROSGeometry;
+using RosMessageTypes.Sensor;
+using RosMessageTypes.Geometry;
+using System.Collections;
+namespace RosSharp.Control
+{
+public enum ControlMode { Keyboard, ROS};
+public class AGVController : MonoBehaviour
+{
+    
+    public string laserTopic = "/scan";
+    public string cmdVelTopic = "/cmd_vel";
+    public bool startTheCoroutine = false;
+    public float minSafeDistance = 0.1f; // Stop if obstacle is closer than this
+    public bool objectDetected = false;
+    
+    void LaserCallback(LaserScanMsg msg)
+	{
+    	int totalRanges = msg.ranges.Length;
+    	int frontIndex = Mathf.RoundToInt((0f - msg.angle_min) / msg.angle_increment);
+
+    	int coneAngle = 30; // degrees to each side
+    	int coneSamples = Mathf.RoundToInt((coneAngle * Mathf.Deg2Rad) / msg.angle_increment);
+
+    	float minRangeInCone = float.PositiveInfinity;
+
+    	for (int i = frontIndex - coneSamples; i <= frontIndex + coneSamples; i++)
+    	{	
+        	if (i < 0 || i >= totalRanges)
+        	    continue;
+
+        	float range = msg.ranges[i];
+        	if (!float.IsInfinity(range) && !float.IsNaN(range))
+        	{
+            	if (range < minRangeInCone)
+            	{
+                	minRangeInCone = range;
+            	}
+            	}	
+        
+    	}
+
+    	Debug.Log("Min range in cone: " + minRangeInCone);
+
+    	if (minRangeInCone < minSafeDistance)
+    	{
+        	StopRobot();
+        	rosLinear = 0f;
+        	rosAngular = 0f;
+        	objectDetected = true;
+    	}
+    	else
+    	{
+        	objectDetected = false;
+    	}
+}
+    IEnumerator MoveToTarget(float a, float b) {
+        startTheCoroutine = true;
+        yield return new WaitForSeconds(1f);
+    }
+
+
+    void StopRobot()
+    {
+        TwistMsg stopMsg = new TwistMsg
+        {
+            linear = new Vector3Msg(0, 0, 0),
+            angular = new Vector3Msg(0, 0, 0)
+        };
+
+        ros.Publish(cmdVelTopic, stopMsg);
+        Debug.Log("ObjectAvoidance: Obstacle detected! Robot stopped.");
+    }
+
+    public GameObject wheel1;
+    public GameObject wheel2;
+    public GameObject baseLink;
+    public ControlMode mode = ControlMode.ROS;
+
+    private ArticulationBody wA1;
+    private ArticulationBody wA2;
+
+    public float maxLinearSpeed = 2; //  m/s
+    public float maxRotationalSpeed = 1;//
+    public float wheelRadius = 0.033f; //meters
+    public float trackWidth = 0.288f; // meters Distance between tyres
+    public float forceLimit = 10;
+    public float damping = 10;
+
+    public float ROSTimeout = 0.5f;
+    private float lastCmdReceived = 0f;
+
+    ROSConnection ros;
+    private RotationDirection direction;
+    private float rosLinear = 0f;
+    private float rosAngular = 0f;
+
+    void Start()
+    {
+        wA1 = wheel1.GetComponent<ArticulationBody>();
+        wA2 = wheel2.GetComponent<ArticulationBody>();
+        SetParameters(wA1);
+        SetParameters(wA2);
+        ros = ROSConnection.GetOrCreateInstance();
+        ros.Subscribe<LaserScanMsg>(laserTopic, LaserCallback);
+        ros.RegisterPublisher<TwistMsg>(cmdVelTopic);  // ✅ Register the publisher
+        ros.Subscribe<TwistMsg>("cmd_vel", ReceiveROSCmd);
+    }
+
+    void Update(){
+        Debug.DrawRay(transform.position, transform.forward * 1.0f, objectDetected ? Color.red : Color.green);
+
+    }
+    void ReceiveROSCmd(TwistMsg cmdVel)
+    {
+        if(objectDetected == false) {
+            if (cmdVel.linear.x==0 && cmdVel.angular.z==0)
+            {
+                rosLinear =0;
+                rosAngular=0;
+            }
+
+            else if (cmdVel.linear.x<0)
+            {
+                rosLinear = (float)((float)cmdVel.linear.x-0.02);
+            } 
+            else if (cmdVel.angular.z<0)
+            { 
+                rosAngular =  (float)((float)cmdVel.angular.z-0.18);
+            }
+            else if (cmdVel.linear.x>0)
+            {
+                rosLinear = (float)((float)cmdVel.linear.x+0.02); //(float)cmdVel.linear.x ;//added 0.05 to account for friction 
+            }
+            else if (cmdVel.angular.z>0)
+            {
+                rosAngular = (float)((float)cmdVel.angular.z+0.18); //(float)cmdVel.angular.z; //added 0.03 to acct for friction
+            }
+            lastCmdReceived = Time.time;
+        }
+        
+    }
+
+    public float actionTimer = 0f;
+    public float actionDuration; // Duration in seconds
+    public float angle;
+    public float distance;
+
+
+    void FixedUpdate()
+    {
+
+        if (objectDetected)
+        {
+            // Ensure robot stops completely when obstacle is detected
+            RobotInput(10f, 0f);
+            return;
+        } if(startTheCoroutine) {
+            actionTimer += Time.fixedDeltaTime;
+            float x = baseLink.transform.eulerAngles.y;
+                            Debug.Log("Angle1:"+ angle + " baseLink.transform.rotation.y+180 " + x);
+            RobotInput(0f, -0.5f);
+            if (x < angle + 1 && x > angle - 1) {
+
+                StopRobot();
+                startTheCoroutine = false;
+            }
+        }
+        else{
+            if (mode == ControlMode.Keyboard)
+            {
+                KeyBoardUpdate();
+            }
+            else if (mode == ControlMode.ROS)
+            {
+                ROSUpdate();
+            } 
+        }
+            
+    }
+
+    private void SetParameters(ArticulationBody joint)
+    {
+        ArticulationDrive drive = joint.xDrive;
+        drive.forceLimit = forceLimit;
+        drive.damping = damping;
+        joint.xDrive = drive;
+    }
+
+    private void SetSpeed(ArticulationBody joint, float wheelSpeed = float.NaN)
+    {
+        ArticulationDrive drive = joint.xDrive;
+        if (float.IsNaN(wheelSpeed))
+        {
+            drive.targetVelocity = ((2 * maxLinearSpeed) / wheelRadius) * Mathf.Rad2Deg * (int)direction;
+        }
+        else
+        {
+            drive.targetVelocity = wheelSpeed;
+        }
+        joint.xDrive = drive;
+    }
+
+    private void KeyBoardUpdate()
+    {
+        if(objectDetected==false) {
+            
+            float moveDirection = Input.GetAxis("Vertical");
+            float inputSpeed;
+            float inputRotationSpeed;
+            if (moveDirection > 0)
+            {
+                inputSpeed = maxLinearSpeed;
+            }
+            else if (moveDirection < 0)
+            {
+                inputSpeed = maxLinearSpeed * -1;
+            }
+            else
+            {
+                inputSpeed = 0;
+            }
+
+            float turnDirction = Input.GetAxis("Horizontal");
+            if (turnDirction > 0)
+            {
+                inputRotationSpeed = maxRotationalSpeed;
+            }
+            else if (turnDirction < 0)
+            {
+                inputRotationSpeed = maxRotationalSpeed * -1;
+            }
+            else
+            {
+                inputRotationSpeed = 0;
+            }
+            RobotInput(inputSpeed, inputRotationSpeed);
+            }
+            
+    }
+
+
+
+    private void ROSUpdate()
+    {
+    
+        if (Time.time - lastCmdReceived > ROSTimeout)
+        {
+            rosLinear = 0f;
+            rosAngular = 0f;
+        }
+         Debug.Log("linear: " + rosLinear);
+        Debug.Log("angular: " + rosAngular);
+        RobotInput(rosLinear, -rosAngular);
+    }
+
+    private void RobotInput(float speed, float rotSpeed) // m/s and rad/s
+    {
+
+        if (speed > maxLinearSpeed)
+        {
+            speed = maxLinearSpeed;
+        }
+        if (rotSpeed > maxRotationalSpeed)
+        {
+            rotSpeed = maxRotationalSpeed;
+        }
+        float wheel1Rotation = (speed / wheelRadius);
+        float wheel2Rotation = wheel1Rotation;
+        float wheelSpeedDiff = ((rotSpeed * trackWidth) / wheelRadius);
+        if (rotSpeed != 0)
+        {
+            wheel1Rotation = (wheel1Rotation + (wheelSpeedDiff / 1)) * Mathf.Rad2Deg;
+            wheel2Rotation = (wheel2Rotation - (wheelSpeedDiff / 1)) * Mathf.Rad2Deg;
+        }
+        else
+        {
+            wheel1Rotation *= Mathf.Rad2Deg;
+            wheel2Rotation *= Mathf.Rad2Deg;
+        }
+        SetSpeed(wA1, wheel1Rotation);
+        SetSpeed(wA2, wheel2Rotation);
+    }
+}
+
+}
